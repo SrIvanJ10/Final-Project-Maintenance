@@ -1,0 +1,103 @@
+services:
+  db:
+    image: postgres:15
+    container_name: myscience_db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-myscience_db}
+      POSTGRES_USER: ${DB_USER:-myscience_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-myscience_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-myscience_user} -d ${DB_NAME:-myscience_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - myscience_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: myscience_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - myscience_network
+
+  web:
+    build: .
+    container_name: myscience_web
+    working_dir: /app/myscience
+    command: >
+      sh -c "python wait_for_db.py &&
+             python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - .:/app
+      - static_volume:/app/myscience/staticfiles
+      - media_volume:/app/myscience/media
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=${DEBUG:-True}
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key}
+      - DB_ENGINE=${DB_ENGINE:-django.db.backends.postgresql}
+      - DB_NAME=${DB_NAME:-myscience_db}
+      - DB_USER=${DB_USER:-myscience_user}
+      - DB_PASSWORD=${DB_PASSWORD:-myscience_password}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_WAIT_TIMEOUT=${DB_WAIT_TIMEOUT:-60}
+      - DB_WAIT_INTERVAL=${DB_WAIT_INTERVAL:-2}
+      - REDIS_URL=redis://redis:6379/0
+      - SEMANTIC_SCHOLAR_API_TIMEOUT=${SEMANTIC_SCHOLAR_API_TIMEOUT:-30}
+      - LLM_API_TIMEOUT=${LLM_API_TIMEOUT:-60}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - myscience_network
+
+  celery:
+    build: .
+    container_name: myscience_celery
+    working_dir: /app/myscience
+    command: >
+      sh -c "python wait_for_db.py &&
+             celery -A myscience worker -l info"
+    volumes:
+      - .:/app
+    environment:
+      - DEBUG=${DEBUG:-True}
+      - DB_ENGINE=${DB_ENGINE:-django.db.backends.postgresql}
+      - DB_NAME=${DB_NAME:-myscience_db}
+      - DB_USER=${DB_USER:-myscience_user}
+      - DB_PASSWORD=${DB_PASSWORD:-myscience_password}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_WAIT_TIMEOUT=${DB_WAIT_TIMEOUT:-60}
+      - DB_WAIT_INTERVAL=${DB_WAIT_INTERVAL:-2}
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - myscience_network
+
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:
+
+networks:
+  myscience_network:
+    driver: bridge
