@@ -400,6 +400,7 @@ class SearchCriteriaViewSet(viewsets.ModelViewSet):
         search.total_results = len(records)
         search.save()
 
+        new_articles = 0
         for rank, record in enumerate(records, 1):
             try:
                 eid = _safe_text(record, 'EID', 'eid', 'Scopus ID', 'scopus_id')
@@ -409,10 +410,12 @@ class SearchCriteriaViewSet(viewsets.ModelViewSet):
                 normalized_id = f"scopus:{hashlib.sha1(stable_key.encode('utf-8')).hexdigest()[:20]}"
 
                 article_defaults = _scopus_record_to_article_defaults(record)
-                article, _ = Article.objects.get_or_create(
+                article, created = Article.objects.get_or_create(
                     semantic_scholar_id=normalized_id,
                     defaults=article_defaults,
                 )
+                if created:
+                    new_articles += 1
 
                 SearchResult.objects.get_or_create(
                     search=search,
@@ -430,7 +433,7 @@ class SearchCriteriaViewSet(viewsets.ModelViewSet):
         search.status = 'completed'
         search.completed_at = timezone.now()
         search.save()
-        return search
+        return search, new_articles
     
     @action(detail=True, methods=['post'])
     def execute_search(self, request, pk=None):
@@ -441,7 +444,7 @@ class SearchCriteriaViewSet(viewsets.ModelViewSet):
             if criteria.source_type == 'scopus':
                 records = _parse_scopus_payload(request)
                 query_text = request.data.get('scopus_query', criteria.scopus_query)
-                search = self._import_scopus_records(criteria, records, query_text=query_text)
+                search, _ = self._import_scopus_records(criteria, records, query_text=query_text)
                 return Response(SearchSerializer(search).data, status=status.HTTP_201_CREATED)
 
             keywords = criteria.get_keywords_list()
@@ -590,8 +593,11 @@ class SearchCriteriaViewSet(viewsets.ModelViewSet):
         try:
             records = _parse_scopus_payload(request)
             query_text = request.data.get('scopus_query', criteria.scopus_query)
-            search = self._import_scopus_records(criteria, records, query_text=query_text)
-            return Response(SearchSerializer(search).data, status=status.HTTP_201_CREATED)
+            search, new_articles = self._import_scopus_records(criteria, records, query_text=query_text)
+            data = SearchSerializer(search).data
+            if records and new_articles == 0:
+                data = {**data, 'warning': 'All records already existed; no new articles were created.'}
+            return Response(data, status=status.HTTP_201_CREATED)
         except Exception as exc:
             logger.error(f"Error importing Scopus results: {str(exc)}")
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
