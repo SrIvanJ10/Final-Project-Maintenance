@@ -536,6 +536,77 @@ class ArticleFilterTestCase(APITestCase):
     """
     US-10 — Article listing and filtering.
     Users can filter by source type, by review status, and by a combination of both.
-from core.models import Project, ProjectMembership
+    """
 
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username='owner', email='owner@example.com', password='pass12345!'
+        )
+        self.project = _make_project(self.owner)
+        self.client.force_login(self.owner)
 
+        ss_criteria = _make_ss_criteria(self.project)
+        scopus_criteria = _make_scopus_criteria(self.project)
+        self.ss_search = Search.objects.create(criteria=ss_criteria, status='completed')
+        self.scopus_search = Search.objects.create(criteria=scopus_criteria, status='completed')
+
+        self.ss_art_pending = Article.objects.create(
+            semantic_scholar_id='ss-pending', title='SS Pending', publication_year=2023,
+            article_source='semantic_scholar'
+        )
+        self.ss_art_included = Article.objects.create(
+            semantic_scholar_id='ss-included', title='SS Included', publication_year=2023,
+            article_source='semantic_scholar'
+        )
+        self.scopus_art_pending = Article.objects.create(
+            semantic_scholar_id='sc-pending', title='Scopus Pending', publication_year=2023,
+            article_source='scopus'
+        )
+
+        self.sr_ss_pending = SearchResult.objects.create(
+            search=self.ss_search, article=self.ss_art_pending, rank=1, relevance='not_reviewed'
+        )
+        self.sr_ss_included = SearchResult.objects.create(
+            search=self.ss_search, article=self.ss_art_included, rank=2, relevance='highly_relevant'
+        )
+        self.sr_scopus_pending = SearchResult.objects.create(
+            search=self.scopus_search, article=self.scopus_art_pending, rank=1, relevance='not_reviewed'
+        )
+
+    def test_c09_no_filter_returns_all_results(self):
+        """C-09: GET /search-results/ with no filter returns all 3 results."""
+        response = self.client.get(RESULTS_URL)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_c10_filter_by_source_returns_only_semantic_scholar_articles(self):
+        """C-10: GET /articles/?article_source=semantic_scholar returns only SS articles."""
+        response = self.client.get(ARTICLES_URL, {'article_source': 'semantic_scholar'})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sources = {item['article_source'] for item in response.data['results']}
+        self.assertEqual(sources, {'semantic_scholar'})
+        self.assertEqual(response.data['count'], 2)
+
+    def test_c11_filter_by_pending_status_returns_only_not_reviewed(self):
+        """C-11: GET /search-results/?relevance=not_reviewed returns only pending results."""
+        response = self.client.get(RESULTS_URL, {'relevance': 'not_reviewed'})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        relevances = {item['relevance'] for item in response.data['results']}
+        self.assertEqual(relevances, {'not_reviewed'})
+        self.assertEqual(response.data['count'], 2)
+
+    def test_c12_combined_source_and_status_filter_returns_correct_intersection(self):
+        """C-12: Filtering by SS search + pending returns exactly the 1 SS pending article."""
+        response = self.client.get(RESULTS_URL, {
+            'search': self.ss_search.pk,
+            'relevance': 'not_reviewed',
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        result = response.data['results'][0]
+        self.assertEqual(result['relevance'], 'not_reviewed')
+        self.assertEqual(result['article']['article_source'], 'semantic_scholar')
