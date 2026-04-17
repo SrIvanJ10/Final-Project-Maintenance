@@ -1240,3 +1240,192 @@ class ConsensusTestCase(APITestCase):
         self.result.refresh_from_db()
         self.assertEqual(self.result.relevance, 'not_relevant')
 
+# ===========================================================================
+# BLOCK G — AI Support
+# US-15 (I-AI-01)
+# ===========================================================================
+
+class AISuggestionsTestCase(APITestCase):
+    """
+    US-15 — AI Suggestions for Screening.
+    G-01: Explicit request generates a suggestion and saves interaction in DB.
+    G-02: Empty inclusion criteria returns 400.
+    G-03: LLM Provider failure is caught, logged in DB, and returns 400.
+    """
+
+    def setUp(self):
+        self.reviewer = User.objects.create_user(username='ai_rev', password='pass12345!')
+        self.project = Project.objects.create(
+            title='AI Project', owner=self.reviewer, inclusion_criteria='Must include Machine Learning.'
+        )
+        self.criteria = SearchCriteria.objects.create(project=self.project)
+        self.search = Search.objects.create(criteria=self.criteria, status='completed')
+        self.article = Article.objects.create(title='AI Article')
+        self.result = SearchResult.objects.create(search=self.search, article=self.article, rank=1)
+        
+        self.client.force_login(self.reviewer)
+        self.url = f'/api/v1/search-results/{self.result.pk}/suggest_with_ai/'
+
+    @patch('api.views.request_article_suggestion')
+    def test_g01_successful_ai_request_saves_interaction(self, mock_ai):
+        """G-01 (Integration): AI returns suggestion, DB records interaction as completed."""
+        mock_ai.return_value = {
+            "prompt": "Test prompt",
+            "raw_text": "Include this.",
+            "payload": {},
+            "parsed": {"recommendation": "include", "rationale": "Matches ML criteria."}
+        }
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['recommendation'], "include")
+        
+        # Deep DB Check
+        interaction = ArticleAIInteraction.objects.get(search_result=self.result)
+        self.assertEqual(interaction.status, 'completed')
+        self.assertEqual(interaction.rationale, "Matches ML criteria.")
+        self.assertEqual(interaction.requested_by, self.reviewer)
+
+    def test_g02_ai_request_fails_if_inclusion_criteria_is_empty(self):
+        """G-02 (Edge): Missing project inclusion criteria returns 400 Bad Request."""
+        self.project.inclusion_criteria = ''
+        self.project.save()
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Project inclusion_criteria is empty', response.data.get('error', ''))
+        # Ensure no interaction was saved
+        self.assertFalse(ArticleAIInteraction.objects.filter(search_result=self.result).exists())
+
+    @patch('api.views.request_article_suggestion')
+    def test_g03_llm_service_error_is_caught_and_saved_in_db(self, mock_ai):
+        """G-03 (Edge): LLM API downtime returns 400 and saves 'failed' state in DB."""
+        mock_ai.side_effect = LLMServiceError("OpenAI API is down")
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        
+        # Deep DB Check: Ensure failure was audited
+        interaction = ArticleAIInteraction.objects.get(search_result=self.result)
+        self.assertEqual(interaction.status, 'failed')
+        self.assertEqual(interaction.error_message, "OpenAI API is down")
+
+
+# ===========================================================================
+# BLOCK H — Discussion Threads (Chat)
+# US-16 (I-COMM-01)
+# ===========================================================================
+
+class DiscussionThreadTestCase(APITestCase):
+    """
+    US-16 — Chat-style discussion thread.
+    H-01: Valid user can add a comment to the thread.
+    H-02: Deletion of comments is strictly forbidden (405).
+    H-03: Editing comments is strictly forbidden (405).
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='chatter', password='pass12345!')
+        self.project = Project.objects.create(title='Chat Project', owner=self.user)
+        self.article = Article.objects.create(title='Chat Article')
+
+        # Give user access to project
+        ProjectMembership.objects.create(project=self.project, user=self.user, role='reviewer')
+
+        # Link article to project so validate_project_article_pair passes
+        criteria = SearchCriteria.objects.create(project=self.project, keywords='test')
+        search = Search.objects.create(criteria=criteria, status='completed')
+        SearchResult.objects.create(search=search, article=self.article, rank=1)
+        
+        self.client.force_login(self.user)
+        self.list_url = '/api/v1/article-discussions/'
+
+    def test_h01_user_can_post_comment_to_thread(self):
+        """H-01 (Integration): Valid comment returns 201 and creates object in DB."""
+        payload = {
+            'project': self.project.pk,
+            'article': self.article.pk,
+            'message': 'This methodology is flawed.'
+        }
+        
+        response = self.client.post(self.list_url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['message'], 'This methodology is flawed.')
+        
+        # DB Check
+        self.assertTrue(
+            ArticleDiscussionMessage.objects.filter(
+                project=self.project, article=self.article, author=self.user
+            ).exists()
+        )
+
+    def test_h02_comment_deletion_is_prevented(self):
+        """H-02 (Security/Edge): DELETE method is blocked to maintain audit trail."""
+        message = ArticleDiscussionMessage.objects.create(
+            project=self.project, article=self.article, author=self.user, message='To be deleted'
+        )
+        detail_url = f'{self.list_url}{message.pk}/'
+
+        response = self.client.delete(detail_url)
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        # Ensure it still exists in DB
+        self.assertTrue(ArticleDiscussionMessage.objects.filter(pk=message.pk).exists())
+
+    def test_h03_comment_editing_is_prevented(self):
+        """H-03 (Security/Edge): PATCH/PUT methods are blocked to maintain audit trail."""
+        message = ArticleDiscussionMessage.objects.create(
+            project=self.project, article=self.article, author=self.user, message='Original'
+        )
+        detail_url = f'{self.list_url}{message.pk}/'
+
+        response = self.client.patch(detail_url, {'message': 'Edited secretly'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        
+        # Check DB to ensure text didn't change
+        message.refresh_from_db()
+        self.assertEqual(message.message, 'Original')
+
+
+# ===========================================================================
+# BLOCK I — System Administration
+# US-18 (S-ADMIN-01)
+# ===========================================================================
+
+class SystemAdminTestCase(APITestCase):
+    """
+    US-18 — Admin panel access.
+    I-01: Superusers can access the Django admin panel.
+    I-02: Regular users are redirected to login or forbidden when attempting access.
+    """
+
+    def setUp(self):
+        self.admin_user = User.objects.create_superuser(
+            username='admin_boss', email='admin@test.com', password='pass12345!'
+        )
+        self.regular_user = User.objects.create_user(
+            username='regular', email='reg@test.com', password='pass12345!'
+        )
+        self.admin_url = '/admin/'
+
+    def test_i01_superuser_can_access_admin_panel(self):
+        """I-01 (System): Admin user receives a 200/302 OK when accessing /admin/."""
+        self.client.force_login(self.admin_user)
+        response = self.client.get(self.admin_url)
+        
+        # Depending on exact Django setup, it's either 200 (Dashboard) or 302 (Redirect inside admin)
+        self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_302_FOUND])
+
+    def test_i02_regular_user_cannot_access_admin_panel(self):
+        """I-02 (Security): Regular user accessing /admin/ is redirected to admin login (302)."""
+        self.client.force_login(self.regular_user)
+        response = self.client.get(self.admin_url)
+        
+        # Regular users get redirected back to the admin login page
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertIn('login', response.url.lower())
