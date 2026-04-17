@@ -1313,3 +1313,119 @@ class AISuggestionsTestCase(APITestCase):
         self.assertEqual(interaction.status, 'failed')
         self.assertEqual(interaction.error_message, "OpenAI API is down")
 
+
+# ===========================================================================
+# BLOCK H — Discussion Threads (Chat)
+# US-16 (I-COMM-01)
+# ===========================================================================
+
+class DiscussionThreadTestCase(APITestCase):
+    """
+    US-16 — Chat-style discussion thread.
+    H-01: Valid user can add a comment to the thread.
+    H-02: Deletion of comments is strictly forbidden (405).
+    H-03: Editing comments is strictly forbidden (405).
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='chatter', password='pass12345!')
+        self.project = Project.objects.create(title='Chat Project', owner=self.user)
+        self.article = Article.objects.create(title='Chat Article')
+
+        # Give user access to project
+        ProjectMembership.objects.create(project=self.project, user=self.user, role='reviewer')
+
+        # Link article to project so validate_project_article_pair passes
+        criteria = SearchCriteria.objects.create(project=self.project, keywords='test')
+        search = Search.objects.create(criteria=criteria, status='completed')
+        SearchResult.objects.create(search=search, article=self.article, rank=1)
+        
+        self.client.force_login(self.user)
+        self.list_url = '/api/v1/article-discussions/'
+
+    def test_h01_user_can_post_comment_to_thread(self):
+        """H-01 (Integration): Valid comment returns 201 and creates object in DB."""
+        payload = {
+            'project': self.project.pk,
+            'article': self.article.pk,
+            'message': 'This methodology is flawed.'
+        }
+        
+        response = self.client.post(self.list_url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['message'], 'This methodology is flawed.')
+        
+        # DB Check
+        self.assertTrue(
+            ArticleDiscussionMessage.objects.filter(
+                project=self.project, article=self.article, author=self.user
+            ).exists()
+        )
+
+    def test_h02_comment_deletion_is_prevented(self):
+        """H-02 (Security/Edge): DELETE method is blocked to maintain audit trail."""
+        message = ArticleDiscussionMessage.objects.create(
+            project=self.project, article=self.article, author=self.user, message='To be deleted'
+        )
+        detail_url = f'{self.list_url}{message.pk}/'
+
+        response = self.client.delete(detail_url)
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        # Ensure it still exists in DB
+        self.assertTrue(ArticleDiscussionMessage.objects.filter(pk=message.pk).exists())
+
+    def test_h03_comment_editing_is_prevented(self):
+        """H-03 (Security/Edge): PATCH/PUT methods are blocked to maintain audit trail."""
+        message = ArticleDiscussionMessage.objects.create(
+            project=self.project, article=self.article, author=self.user, message='Original'
+        )
+        detail_url = f'{self.list_url}{message.pk}/'
+
+        response = self.client.patch(detail_url, {'message': 'Edited secretly'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        
+        # Check DB to ensure text didn't change
+        message.refresh_from_db()
+        self.assertEqual(message.message, 'Original')
+
+
+# ===========================================================================
+# BLOCK I — System Administration
+# US-18 (S-ADMIN-01)
+# ===========================================================================
+
+class SystemAdminTestCase(APITestCase):
+    """
+    US-18 — Admin panel access.
+    I-01: Superusers can access the Django admin panel.
+    I-02: Regular users are redirected to login or forbidden when attempting access.
+    """
+
+    def setUp(self):
+        self.admin_user = User.objects.create_superuser(
+            username='admin_boss', email='admin@test.com', password='pass12345!'
+        )
+        self.regular_user = User.objects.create_user(
+            username='regular', email='reg@test.com', password='pass12345!'
+        )
+        self.admin_url = '/admin/'
+
+    def test_i01_superuser_can_access_admin_panel(self):
+        """I-01 (System): Admin user receives a 200/302 OK when accessing /admin/."""
+        self.client.force_login(self.admin_user)
+        response = self.client.get(self.admin_url)
+        
+        # Depending on exact Django setup, it's either 200 (Dashboard) or 302 (Redirect inside admin)
+        self.assertIn(response.status_code, [status.HTTP_200_OK, status.HTTP_302_FOUND])
+
+    def test_i02_regular_user_cannot_access_admin_panel(self):
+        """I-02 (Security): Regular user accessing /admin/ is redirected to admin login (302)."""
+        self.client.force_login(self.regular_user)
+        response = self.client.get(self.admin_url)
+        
+        # Regular users get redirected back to the admin login page
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertIn('login', response.url.lower())
