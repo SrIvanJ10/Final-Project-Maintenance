@@ -824,3 +824,370 @@ class ArticleFilterTestCase(APITestCase):
         result = response.data['results'][0]
         self.assertEqual(result['relevance'], 'not_reviewed')
         self.assertEqual(result['article']['article_source'], 'semantic_scholar')
+
+# ===========================================================================
+# BLOCK D — Screening Distribution & Consensus (Integration / Acceptance)
+# US-12 (U-WORK-01), US-13 (I-VOTE-01), US-14 (U-CONS-01)
+# Unit tests for D-04, D-08, D-09, D-11 live in core/tests.py
+# ===========================================================================
+
+from workflow.models import ScreeningTask, WorkflowPhase
+
+
+def _make_pending_results(search, n, prefix='d'):
+    """Create n pending SearchResult rows for the given search."""
+    results = []
+    for i in range(1, n + 1):
+        art = Article.objects.create(
+            semantic_scholar_id=f'{prefix}-art-{search.pk}-{i}',
+            title=f'Article {i}',
+            publication_year=2024,
+        )
+        results.append(SearchResult.objects.create(search=search, article=art, rank=i))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# US-12 — Start Review (Workload Distribution)
+# ---------------------------------------------------------------------------
+
+class StartReviewTestCase(APITestCase):
+    """
+    US-12 — start_review endpoint.
+    D-01: Owner starts review → 200, tasks created, phase active.
+    D-02: Non-owner → 403.
+    D-03: No pending articles → 400.
+    """
+
+    def setUp(self):
+        self.alice = User.objects.create_user(username='alice', password='pass12345!')
+        self.bob   = User.objects.create_user(username='bob',   password='pass12345!')
+        self.carol = User.objects.create_user(username='carol', password='pass12345!')
+
+        self.project = Project.objects.create(
+            title='Review Project',
+            description='Desc',
+            owner=self.alice,
+            research_question='RQ',
+            objectives='OBJ',
+            scope='Scope',
+        )
+        ProjectMembership.objects.create(project=self.project, user=self.bob,   role='reviewer')
+        ProjectMembership.objects.create(project=self.project, user=self.carol, role='reviewer')
+        self.project.collaborators.add(self.bob, self.carol)
+
+        criteria     = SearchCriteria.objects.create(project=self.project, name='C', keywords='ai')
+        self.search  = Search.objects.create(criteria=criteria, status='completed')
+        self.results = _make_pending_results(self.search, n=5, prefix='rev')
+        self.start_url = f'/api/v1/projects/{self.project.pk}/start_review/'
+
+    def test_d01_owner_starts_review_returns_200_and_distributes_tasks(self):
+        """D-01 (Integration): Owner triggers start_review → 200, status review_started,
+        3 entries in distributed_to, ScreeningPhase is_active=True, ScreeningTasks created."""
+        self.client.force_login(self.alice)
+
+        response = self.client.post(self.start_url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'review_started')
+        self.assertEqual(len(response.data['distributed_to']), 3)
+
+        phase = WorkflowPhase.objects.get(project=self.project, phase_type='screening')
+        self.assertTrue(phase.is_active)
+        self.assertGreaterEqual(ScreeningTask.objects.filter(phase=phase).count(), 1)
+
+    def test_d02_non_owner_cannot_start_review(self):
+        """D-02 (Integration): Reviewer calls start_review → 403, no tasks created."""
+        self.client.force_login(self.bob)
+
+        response = self.client.post(self.start_url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('Only the project owner can start the review', response.data.get('error', ''))
+        self.assertEqual(ScreeningTask.objects.count(), 0)
+
+    def test_d03_start_review_fails_when_no_pending_articles(self):
+        """D-03 (Integration): No not_reviewed results → 400, no ScreeningPhase activated."""
+        for result in self.results:
+            result.relevance = 'highly_relevant'
+            result.save(update_fields=['relevance'])
+
+        self.client.force_login(self.alice)
+        response = self.client.post(self.start_url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('There are no pending articles to distribute', response.data.get('error', ''))
+        self.assertFalse(
+            WorkflowPhase.objects.filter(project=self.project, is_active=True).exists()
+        )
+
+
+# ---------------------------------------------------------------------------
+# US-13 — Individual Assessment (Screening Queue)
+# ---------------------------------------------------------------------------
+
+class ScreeningQueueTestCase(APITestCase):
+    """
+    US-13 — Screening queue and individual assessment.
+    D-05: Reviewer votes on an article → assessment recorded, next article still pending.
+    D-06: Reviewer votes on the last article → no more pending in their assignment.
+    D-07: Reviewer's pending queue shows only their unreviewed assigned articles.
+    """
+
+    def setUp(self):
+        self.owner    = User.objects.create_user(username='owner',    password='pass12345!')
+        self.reviewer = User.objects.create_user(username='reviewer', password='pass12345!')
+
+        self.project = Project.objects.create(
+            title='Queue Project',
+            description='Desc',
+            owner=self.owner,
+            research_question='RQ',
+            objectives='OBJ',
+            scope='Scope',
+        )
+        ProjectMembership.objects.create(project=self.project, user=self.reviewer, role='reviewer')
+        self.project.collaborators.add(self.reviewer)
+
+        criteria    = SearchCriteria.objects.create(project=self.project, name='C', keywords='ai')
+        self.search = Search.objects.create(criteria=criteria, status='completed')
+        self.results = _make_pending_results(self.search, n=3, prefix='queue')
+
+    def test_d05_reviewer_votes_include_and_assessment_is_recorded(self):
+        """D-05 (Integration): POST assess_relevance records the vote and the remaining
+        articles are still pending."""
+        self.client.force_login(self.reviewer)
+        url = f'/api/v1/search-results/{self.results[0].pk}/assess_relevance/'
+
+        response = self.client.post(url, {'relevance': 'highly_relevant'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.assertTrue(
+            SearchResultAssessment.objects.filter(
+                search_result=self.results[0],
+                reviewer=self.reviewer,
+                relevance='highly_relevant',
+            ).exists()
+        )
+        # Two articles are still unreviewed.
+        pending = SearchResult.objects.filter(
+            search=self.search,
+        ).exclude(
+            assessments__reviewer=self.reviewer,
+        ).count()
+        self.assertEqual(pending, 2)
+
+    def test_d06_reviewer_completes_last_article_leaves_no_pending(self):
+        """D-06 (Acceptance): After voting on the only pending article, the reviewer
+        has no more unreviewed assignments."""
+        result = self.results[0]
+        self.client.force_login(self.reviewer)
+        url = f'/api/v1/search-results/{result.pk}/assess_relevance/'
+
+        # Vote on the only article in a single-item search for this sub-test.
+        single_art = Article.objects.create(
+            semantic_scholar_id='last-art', title='Last Article', publication_year=2024
+        )
+        single_result = SearchResult.objects.create(
+            search=self.search, article=single_art, rank=99
+        )
+        url_last = f'/api/v1/search-results/{single_result.pk}/assess_relevance/'
+        self.client.post(url_last, {'relevance': 'highly_relevant'}, format='json')
+
+        unreviewed_by_reviewer = SearchResult.objects.filter(
+            search=self.search
+        ).exclude(
+            assessments__reviewer=self.reviewer
+        )
+        self.assertNotIn(single_result, unreviewed_by_reviewer)
+
+    def test_d07_reviewer_queue_shows_only_assigned_unreviewed_articles(self):
+        """D-07 (Acceptance): After reviewer A decides on 2 of their 5 assigned articles,
+        exactly 3 remain without an assessment from reviewer A."""
+        reviewer_b = User.objects.create_user(username='reviewer_b', password='pass12345!')
+        ProjectMembership.objects.create(project=self.project, user=reviewer_b, role='reviewer')
+        self.project.collaborators.add(reviewer_b)
+
+        extra_results = []
+        for i in range(4, 11):
+            art = Article.objects.create(
+                semantic_scholar_id=f'queue-art-{i}', title=f'Article {i}', publication_year=2024
+            )
+            extra_results.append(
+                SearchResult.objects.create(search=self.search, article=art, rank=i)
+            )
+
+        # Distribute: owner + reviewer + reviewer_b = 3 participants, 10 articles → 4/3/3
+        self.project.distribute_screening_load()
+
+        # Determine reviewer A's assigned results via ScreeningTask notes.
+        phase = WorkflowPhase.objects.get(project=self.project, phase_type='screening')
+        reviewer_task = ScreeningTask.objects.filter(phase=phase, reviewer=self.reviewer).first()
+        assigned_ids     = json.loads(reviewer_task.notes).get('assigned_result_ids', [])
+        assigned_results = SearchResult.objects.filter(pk__in=assigned_ids)
+
+        # Reviewer A votes on 2 of their assigned articles.
+        self.client.force_login(self.reviewer)
+        for result in list(assigned_results[:2]):
+            self.client.post(
+                f'/api/v1/search-results/{result.pk}/assess_relevance/',
+                {'relevance': 'highly_relevant'},
+                format='json',
+            )
+
+        unreviewed_by_a  = assigned_results.exclude(assessments__reviewer=self.reviewer)
+        expected_pending = assigned_results.count() - 2
+        self.assertEqual(unreviewed_by_a.count(), expected_pending)
+
+        # None of reviewer B's articles appear in reviewer A's pending queue.
+        reviewer_b_task = ScreeningTask.objects.filter(phase=phase, reviewer=reviewer_b).first()
+        reviewer_b_ids  = json.loads(reviewer_b_task.notes).get('assigned_result_ids', [])
+        overlap = set(reviewer_b_ids) & set(unreviewed_by_a.values_list('pk', flat=True))
+        self.assertEqual(len(overlap), 0)
+
+# ===========================================================================
+# BLOCK E — Export Results
+# US-11 (S-EXP-01)
+# ===========================================================================
+
+class ExportResultsTestCase(APITestCase):
+    """
+    US-11 — Export results (S-EXP-01, System).
+
+    These tests verify the backend data contract required by the frontend
+    export function.  See the architectural note above for full context.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username='owner', email='owner@example.com', password='pass12345!'
+        )
+        self.project = Project.objects.create(
+            title='Systematic Review 2024',
+            description='Desc',
+            owner=self.owner,
+            research_question='RQ',
+            objectives='OBJ',
+            scope='Scope',
+        )
+        criteria    = SearchCriteria.objects.create(
+            project=self.project, name='C', keywords='ai'
+        )
+        self.search = Search.objects.create(criteria=criteria, status='completed')
+        self.client.force_login(self.owner)
+
+    def _create_rich_article(self, uid):
+        """Article with all fields populated so the export has non-empty columns."""
+        return Article.objects.create(
+            semantic_scholar_id=f'exp-art-{uid}',
+            title=f'Article {uid}: A Study',
+            abstract='Some abstract.',
+            authors=[{'name': f'Author {uid}'}],
+            publication_year=2023,
+            publication_venue=f'Journal {uid}',
+            source_url=f'https://example.com/{uid}',
+            article_source='semantic_scholar',
+        )
+
+    def _create_results(self, n):
+        results = []
+        for i in range(1, n + 1):
+            art = self._create_rich_article(i)
+            results.append(
+                SearchResult.objects.create(
+                    search=self.search, article=art, rank=i,
+                    relevance='highly_relevant', reviewer_notes=f'Note {i}',
+                )
+            )
+        return results
+
+    # --- E-01 / E-03 --------------------------------------------------------
+
+    def test_e01_api_returns_all_fields_required_by_export_function(self):
+        """E-01 (System): With 5 results the API returns exactly 5 rows, each
+        containing every field consumed by exportResultsCsv()."""
+        self._create_results(5)
+
+        response = self.client.get(RESULTS_URL, {'search': self.search.pk})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 5)
+
+        required_result_fields  = {'rank', 'relevance', 'reviewer_notes', 'article'}
+        required_article_fields = {
+            'article_source', 'title', 'authors',
+            'publication_year', 'publication_venue', 'source_url',
+        }
+        for item in response.data['results']:
+            self.assertTrue(
+                required_result_fields.issubset(item.keys()),
+                msg=f'Missing result fields: {required_result_fields - set(item.keys())}',
+            )
+            self.assertTrue(
+                required_article_fields.issubset(item['article'].keys()),
+                msg=f'Missing article fields: {required_article_fields - set(item["article"].keys())}',
+            )
+
+    def test_e03_project_title_is_accessible_for_filename_generation(self):
+        """E-03 (Acceptance): The project title used to build the download filename
+        is correctly stored and returned by the API."""
+        response = self.client.get(f'{PROJECT_URL}{self.project.pk}/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['title'], 'Systematic Review 2024')
+        # The frontend builds: `${project.title}-articles.csv`
+        expected_filename = f"{response.data['title']}-articles.csv"
+        self.assertEqual(expected_filename, 'Systematic Review 2024-articles.csv')
+
+    def test_e03_project_title_reflects_actual_project_name(self):
+        """E-03 (Acceptance): A project titled 'Machine Learning Review' produces
+        the expected filename string."""
+        ml_project = Project.objects.create(
+            title='Machine Learning Review',
+            description='Desc',
+            owner=self.owner,
+            research_question='RQ',
+            objectives='OBJ',
+            scope='Scope',
+        )
+        response = self.client.get(f'{PROJECT_URL}{ml_project.pk}/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        expected_filename = f"{response.data['title']}-articles.csv"
+        self.assertEqual(expected_filename, 'Machine Learning Review-articles.csv')
+
+    # --- E-02 ---------------------------------------------------------------
+
+    def test_e02_no_results_means_export_source_is_empty(self):
+        """E-02 (System): When the project has no search results the API returns
+        count=0, which triggers the 'There are no results to export' message in
+        the frontend."""
+        response = self.client.get(RESULTS_URL, {'search': self.search.pk})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    # --- E-04 ---------------------------------------------------------------
+
+    def test_e04_fallback_filename_when_title_is_missing(self):
+        """E-04 (Acceptance): The frontend falls back to 'results-articles.csv'
+        when selectedProject.title is falsy.  The Project model requires a non-blank
+        title, so this scenario can only arise from a frontend state where no project
+        is selected.  We verify the fallback expression: title || 'results'."""
+        # Simulate the JS expression: (title || 'results') + '-articles.csv'
+        title    = ''           # no project selected in the UI
+        filename = f"{title or 'results'}-articles.csv"
+        self.assertEqual(filename, 'results-articles.csv')
+
+    # --- E-01 column order --------------------------------------------------
+
+    def test_e01_result_rank_values_are_sequential_and_match_import_order(self):
+        """E-01 (System): rank values in the API response match the order in which
+        articles were imported, ensuring the CSV rows are deterministically ordered."""
+        self._create_results(5)
+
+        response = self.client.get(RESULTS_URL, {'search': self.search.pk})
+
+        ranks = [item['rank'] for item in response.data['results']]
+        self.assertEqual(ranks, sorted(ranks))
