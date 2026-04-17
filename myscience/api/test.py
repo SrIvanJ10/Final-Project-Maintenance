@@ -10,6 +10,8 @@ from rest_framework.test import APITestCase
 
 from core.models import (
     Article,
+    ArticleAIInteraction,
+    ArticleDiscussionMessage,
     Project,
     ProjectMembership,
     Search,
@@ -17,6 +19,8 @@ from core.models import (
     SearchResult,
     SearchResultAssessment,
 )
+
+from api.llm import LLMServiceError
 
 # ===========================================================================
 # BLOCK A — Authentication & Collaborators
@@ -1191,3 +1195,48 @@ class ExportResultsTestCase(APITestCase):
 
         ranks = [item['rank'] for item in response.data['results']]
         self.assertEqual(ranks, sorted(ranks))
+
+
+# ===========================================================================
+# BLOCK F — Team Consensus & Immediate Rejection
+# US-14 (U-CONS-01)
+# ===========================================================================
+
+class ConsensusTestCase(APITestCase):
+    """
+    US-14 — Team Consensus Logic.
+    F-01: A single 'not_relevant' vote automatically rejects the article.
+    F-02: Voting 'highly_relevant' keeps the article pending until everyone votes.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(username='owner_cons', password='pass12345!')
+        self.reviewer = User.objects.create_user(username='rev_cons', password='pass12345!')
+
+        self.project = Project.objects.create(
+            title='Consensus Project', owner=self.owner,
+        )
+        ProjectMembership.objects.create(project=self.project, user=self.reviewer, role='reviewer')
+        self.project.collaborators.add(self.reviewer)
+
+        self.criteria = SearchCriteria.objects.create(project=self.project, name='C')
+        self.search = Search.objects.create(criteria=self.criteria, status='completed')
+        self.article = Article.objects.create(title='Test Article', publication_year=2024)
+        self.result = SearchResult.objects.create(search=self.search, article=self.article, rank=1, relevance='pending')
+        
+        self.url = f'/api/v1/search-results/{self.result.pk}/assess_relevance/'
+
+    def test_f01_single_negative_vote_rejects_article_immediately(self):
+        """F-01 (Integration): A single 'not_relevant' assessment automatically updates 
+        the SearchResult relevance to rejected."""
+        self.client.force_login(self.reviewer)
+        
+        # WHEN: The reviewer votes NO
+        response = self.client.post(self.url, {'relevance': 'not_relevant', 'notes': 'Bad methodology'}, format='json')
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        
+        # THEN: Verify DB state has updated the result to rejected
+        self.result.refresh_from_db()
+        self.assertEqual(self.result.relevance, 'not_relevant')
+
