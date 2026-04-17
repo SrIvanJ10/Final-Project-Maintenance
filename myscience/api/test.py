@@ -1,17 +1,21 @@
+import io
 import json
+import os
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from core.models import (
+    Article,
     Project,
     ProjectMembership,
-    SearchCriteria,
     Search,
-    Article,
+    SearchCriteria,
     SearchResult,
+    SearchResultAssessment,
 )
 
 # ===========================================================================
