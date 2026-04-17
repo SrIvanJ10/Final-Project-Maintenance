@@ -1240,3 +1240,76 @@ class ConsensusTestCase(APITestCase):
         self.result.refresh_from_db()
         self.assertEqual(self.result.relevance, 'not_relevant')
 
+# ===========================================================================
+# BLOCK G — AI Support
+# US-15 (I-AI-01)
+# ===========================================================================
+
+class AISuggestionsTestCase(APITestCase):
+    """
+    US-15 — AI Suggestions for Screening.
+    G-01: Explicit request generates a suggestion and saves interaction in DB.
+    G-02: Empty inclusion criteria returns 400.
+    G-03: LLM Provider failure is caught, logged in DB, and returns 400.
+    """
+
+    def setUp(self):
+        self.reviewer = User.objects.create_user(username='ai_rev', password='pass12345!')
+        self.project = Project.objects.create(
+            title='AI Project', owner=self.reviewer, inclusion_criteria='Must include Machine Learning.'
+        )
+        self.criteria = SearchCriteria.objects.create(project=self.project)
+        self.search = Search.objects.create(criteria=self.criteria, status='completed')
+        self.article = Article.objects.create(title='AI Article')
+        self.result = SearchResult.objects.create(search=self.search, article=self.article, rank=1)
+        
+        self.client.force_login(self.reviewer)
+        self.url = f'/api/v1/search-results/{self.result.pk}/suggest_with_ai/'
+
+    @patch('api.views.request_article_suggestion')
+    def test_g01_successful_ai_request_saves_interaction(self, mock_ai):
+        """G-01 (Integration): AI returns suggestion, DB records interaction as completed."""
+        mock_ai.return_value = {
+            "prompt": "Test prompt",
+            "raw_text": "Include this.",
+            "payload": {},
+            "parsed": {"recommendation": "include", "rationale": "Matches ML criteria."}
+        }
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['recommendation'], "include")
+        
+        # Deep DB Check
+        interaction = ArticleAIInteraction.objects.get(search_result=self.result)
+        self.assertEqual(interaction.status, 'completed')
+        self.assertEqual(interaction.rationale, "Matches ML criteria.")
+        self.assertEqual(interaction.requested_by, self.reviewer)
+
+    def test_g02_ai_request_fails_if_inclusion_criteria_is_empty(self):
+        """G-02 (Edge): Missing project inclusion criteria returns 400 Bad Request."""
+        self.project.inclusion_criteria = ''
+        self.project.save()
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Project inclusion_criteria is empty', response.data.get('error', ''))
+        # Ensure no interaction was saved
+        self.assertFalse(ArticleAIInteraction.objects.filter(search_result=self.result).exists())
+
+    @patch('api.views.request_article_suggestion')
+    def test_g03_llm_service_error_is_caught_and_saved_in_db(self, mock_ai):
+        """G-03 (Edge): LLM API downtime returns 400 and saves 'failed' state in DB."""
+        mock_ai.side_effect = LLMServiceError("OpenAI API is down")
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        
+        # Deep DB Check: Ensure failure was audited
+        interaction = ArticleAIInteraction.objects.get(search_result=self.result)
+        self.assertEqual(interaction.status, 'failed')
+        self.assertEqual(interaction.error_message, "OpenAI API is down")
+
