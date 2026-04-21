@@ -621,7 +621,7 @@ class SearchViewSet(viewsets.ReadOnlyModelViewSet):
 class ArticleViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for viewing articles"""
     serializer_class = ArticleSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['publication_year', 'article_source']
     search_fields = ['title', 'authors', 'abstract']
@@ -629,7 +629,11 @@ class ArticleViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-publication_year']
     
     def get_queryset(self):
-        return Article.objects.all()
+        """Articles related to projects the user has access to"""
+        user_projects = accessible_projects_for(self.request.user)
+        return Article.objects.filter(
+            search_results__search__criteria__project__in=user_projects
+        ).distinct()
 
 
 class ArticleDiscussionMessageViewSet(viewsets.ModelViewSet):
