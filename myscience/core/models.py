@@ -91,13 +91,12 @@ class Project(models.Model):
         return self.get_member_role(user) is not None
 
     def can_review(self, user):
-        # Intentionally permissive for the testing assignment:
-        # any project member can perform review actions.
-        return self.has_access(user)
+        """Only Owners and Reviewers can perform review actions (Voting)."""
+        role = self.get_member_role(user)
+        return role in ['owner', 'reviewer']
 
     def can_discuss(self, user):
-        # Intentionally permissive for the testing assignment:
-        # any project member can participate in discussions.
+        """Intentionally permissive for the testing assignment: any project member can participate in discussions."""
         return self.has_access(user)
 
     def get_reviewers(self):
@@ -116,13 +115,11 @@ class Project(models.Model):
     def get_screening_participants(self):
         """
         Return users that will receive screening load.
-
-        Intentionally permissive for the testing assignment:
-        any project member with access can be assigned work, not only real reviewers.
+        Only Owners and Reviewers are eligible for workload distribution.
         """
         return User.objects.filter(
             models.Q(id=self.owner_id) |
-            models.Q(project_memberships__project=self)
+            models.Q(project_memberships__project=self, project_memberships__role='reviewer')
         ).distinct().order_by('id')
 
     def get_or_create_screening_phase(self):
@@ -161,7 +158,9 @@ class Project(models.Model):
         phase.is_completed = False
         phase.save(update_fields=['started_at', 'is_active', 'is_completed', 'updated_at'])
 
-        ScreeningTask.objects.filter(phase=phase).delete()
+        # Non-destructive distribution: only remove tasks that have no progress.
+        # This preserves the 'work done' by researchers as required by the Testing Plan.
+        ScreeningTask.objects.filter(phase=phase, reviewed_items=0).delete()
 
         total_results = len(pending_results)
         participant_count = len(participants)
@@ -543,12 +542,17 @@ class SearchResult(models.Model):
         excluded_values = {'not_relevant', 'duplicate'}
         included_values = {'highly_relevant', 'relevant', 'somewhat_relevant'}
 
-        if any(assessment.relevance in excluded_values for assessment in assessments):
-            self.relevance = 'not_relevant'
-        elif required_reviewer_ids and required_reviewer_ids.issubset(assessment_by_reviewer.keys()):
-            if all(assessment_by_reviewer[reviewer_id].relevance in included_values for reviewer_id in required_reviewer_ids):
+        # A decision is only reached if all required reviewers have voted.
+        # If there is a conflict (mixed votes), it remains 'not_reviewed' (Pending), until the Leader (Owner) makes a final decision or consensus is reached.
+        if required_reviewer_ids and required_reviewer_ids.issubset(assessment_by_reviewer.keys()):
+            all_votes = [assessment_by_reviewer[rid].relevance for rid in required_reviewer_ids]
+            
+            if all(v in included_values for v in all_votes):
                 self.relevance = 'highly_relevant'
+            elif all(v in excluded_values for v in all_votes):
+                self.relevance = 'not_relevant'
             else:
+                """Potential conflict, wait for leader or discussion"""
                 self.relevance = 'not_reviewed'
         else:
             self.relevance = 'not_reviewed'
@@ -576,6 +580,9 @@ class SearchResult(models.Model):
         return self.relevance
 
     def record_assessment(self, reviewer, relevance, notes=''):
+        if not self.search.criteria.project.can_review(reviewer):
+            raise PermissionError("Solo los propietarios y revisores pueden votar en este proyecto.")
+
         if relevance not in dict(self.RELEVANCE_CHOICES):
             raise ValueError('Invalid relevance value')
 
