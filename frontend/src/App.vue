@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import * as api from './lib/api'
 
@@ -60,6 +60,16 @@ const projectCriteria = computed(() => {
   if (!selectedProject.value) return []
   return lists.criteria.filter((c) => c.project === selectedProject.value.id)
 })
+
+const currentUserRole = computed(() => {
+  if (!selectedProject.value || !user.value) return null
+  if (selectedProject.value.owner?.id === user.value.id) return 'owner'
+  const membership = selectedProject.value.collaborators?.find((c) => c.id === user.value.id)
+  return membership?.role || null
+})
+
+const isOwner = computed(() => currentUserRole.value === 'owner')
+const canReview = computed(() => ['owner', 'reviewer'].includes(currentUserRole.value))
 
 const sourceCriteria = computed(() => {
   return projectCriteria.value.find((c) => c.source_type === ui.sourceType) || null
@@ -188,7 +198,7 @@ function relevanceTag(relevance) {
 
 function consensusLabel(result) {
   const pendingVotes = result?.pending_reviewers?.length || 0
-  if (EXCLUDED_RELEVANCE.includes(result?.relevance)) return 'Excluded by at least one reviewer'
+  if (EXCLUDED_RELEVANCE.includes(result?.relevance)) return 'Unanimously excluded'
   if (INCLUDED_RELEVANCE.includes(result?.relevance)) return 'Unanimously included'
   if (pendingVotes > 0) return `${pendingVotes} vote${pendingVotes === 1 ? '' : 's'} pending`
   return 'Consensus pending'
@@ -804,7 +814,7 @@ onMounted(boot)
                 rows="8"
                 placeholder="Define the project inclusion criteria"
               />
-              <div class="inline-actions">
+              <div v-if="canReview" class="inline-actions">
                 <button class="primary" @click="saveProjectInclusionCriteria">Save Criteria</button>
               </div>
             </div>
@@ -824,7 +834,7 @@ onMounted(boot)
                   {{ collaborator.username }} · {{ roleLabel(collaborator.role) }}
                 </span>
               </div>
-              <div class="inline-actions">
+              <div v-if="isOwner" class="inline-actions">
                 <input
                   v-model="drafts.collaboratorQuery"
                   placeholder="collaborator username"
@@ -898,7 +908,7 @@ onMounted(boot)
                   />
                 </label>
                 <p class="hint">Define your search query using SCOPUS syntax</p>
-                <button class="primary" @click="saveQuery">Save Query</button>
+                <button v-if="canReview" class="primary" @click="saveQuery">Save Query</button>
 
                 <hr />
 
@@ -906,7 +916,7 @@ onMounted(boot)
                 <p class="info-box">
                   <strong>Instructions:</strong> Export the results from SCOPUS in CSV format and upload them here. The file should include columns such as Title, Authors, Year, Abstract, DOI, etc.
                 </p>
-                <label class="upload-btn">
+                <label v-if="canReview" class="upload-btn">
                   Upload CSV File
                   <input type="file" accept=".csv,.json,application/json,text/csv" @change="importScopus" />
                 </label>
@@ -922,7 +932,7 @@ onMounted(boot)
                   />
                 </label>
                 <p class="hint">Separate multiple terms with commas to broaden the search.</p>
-                <div class="inline-actions">
+                <div v-if="canReview" class="inline-actions">
                   <button class="primary" @click="saveQuery">Save Configuration</button>
                   <button class="success" @click="runSemanticSearch">Search in Semantic Scholar</button>
                 </div>
@@ -951,7 +961,7 @@ onMounted(boot)
                     </select>
                   </label>
                   <button class="ghost" @click="exportResultsCsv">Export Results</button>
-                  <button class="success" :disabled="!currentResults.length" @click="startReview">
+                  <button v-if="canReview" class="success" :disabled="!currentResults.length" @click="startReview">
                     Start Review ({{ currentPendingCount }} pending)
                   </button>
                 </div>
@@ -1039,9 +1049,12 @@ onMounted(boot)
               </div>
             </div>
 
-            <div class="review-actions">
+            <div v-if="canReview" class="review-actions">
               <button class="danger" @click="reviewCurrent('not_relevant')">Exclude</button>
               <button class="success" @click="reviewCurrent('highly_relevant')">Include</button>
+            </div>
+            <div v-else class="info-box">
+              <p>You are in <strong>View Mode</strong>. Only Owners and Reviewers can vote on articles.</p>
             </div>
 
             <section class="review-section">
@@ -1062,7 +1075,7 @@ onMounted(boot)
 
             <div class="ai-panel">
               <h3>Suggest with AI</h3>
-              <div class="inline-actions">
+              <div v-if="canReview" class="inline-actions">
                 <button class="primary" :disabled="ui.aiLoading" @click="suggestCurrentWithAI">
                   {{ ui.aiLoading ? 'Generating suggestion...' : 'Suggest with AI' }}
                 </button>
@@ -1154,6 +1167,3 @@ onMounted(boot)
     </main>
   </div>
 </template>
-
-
-
