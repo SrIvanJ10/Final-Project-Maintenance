@@ -256,26 +256,6 @@ class PdfExporter:
         return self.renderer.render(html)
 
 
-class ReportExportFacade:
-    def __init__(
-        self,
-        markdown_exporter: Optional[MarkdownExporter] = None,
-        html_exporter: Optional[HtmlExporter] = None,
-        pdf_exporter: Optional[PdfExporter] = None,
-    ):
-        self.markdown_exporter = markdown_exporter or MarkdownExporter()
-        self.html_exporter = html_exporter or HtmlExporter()
-        self.pdf_exporter = pdf_exporter or PdfExporter()
-
-    def export_markdown(self, report: GeneratedReport) -> str:
-        return self.markdown_exporter.export(report)
-
-    def export_html(self, report: GeneratedReport) -> str:
-        return self.html_exporter.export(report)
-
-    def export_pdf(self, report: GeneratedReport) -> bytes:
-        return self.pdf_exporter.export(report)
-
 
 class ProjectDataLoader:
     def load(self, project_id: Any):
@@ -401,10 +381,12 @@ class ReporterService:
         openai_api_key: str = "",
         model: str = "gpt-4o-mini",
         openai_client: Optional[Any] = None,
-        export_facade: Optional[ReportExportFacade] = None,
         openai_base_url: str = "https://api.openai.com/v1",
         openai_timeout: int = 180,
         data_loader: Optional[ProjectDataLoader] = None,
+        markdown_exporter: Optional[MarkdownExporter] = None,
+        html_exporter: Optional[HtmlExporter] = None,
+        pdf_exporter: Optional[PdfExporter] = None,
     ):
         self.openai_api_key = openai_api_key
         self.model = model
@@ -414,16 +396,18 @@ class ReporterService:
             base_url=openai_base_url,
             timeout=openai_timeout,
         )
-        self.export_facade = export_facade or ReportExportFacade()
         self.data_loader = data_loader or ProjectDataLoader()
+        self.markdown_exporter = markdown_exporter or MarkdownExporter()
+        self.html_exporter = html_exporter or HtmlExporter()
+        self.pdf_exporter = pdf_exporter or PdfExporter()
 
     def generate_report(self, project_id: Any, export_mode: str = "markdown") -> Any:
         data = self.data_loader.load(project_id)
 
         export_strategies = {
-            "markdown": (self._generate_markdown_report, self.export_facade.export_markdown),
-            "html":     (self._generate_html_report,     self.export_facade.export_html),
-            "pdf":      (self._generate_html_report,     self.export_facade.export_pdf),
+            "markdown": (self._generate_markdown_report, self.markdown_exporter.export),
+            "html":     (self._generate_html_report,     self.html_exporter.export),
+            "pdf":      (self._generate_html_report,     self.pdf_exporter.export),
         }
         if export_mode not in export_strategies:
             raise ValueError(f"Unsupported export mode: {export_mode}")
