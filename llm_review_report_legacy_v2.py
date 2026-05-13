@@ -405,35 +405,23 @@ class ReporterService:
     def generate_report(self, project_id: Any, export_mode: str = "markdown") -> Any:
         project, articles, votes, criteria, discussions = self.data_loader.load(project_id)
 
-        if export_mode == "markdown":
-            body = self._generate_markdown_report(project, articles, votes, criteria, discussions)
-            report = GeneratedReport(
-                title=project.get("title", "Untitled review report"),
-                generated_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                export_mode=export_mode,
-                content=body,
-            )
-            return self.export_facade.export_markdown(report)
-        elif export_mode == "html":
-            body = self._generate_html_report(project, articles, votes, criteria, discussions)
-            report = GeneratedReport(
-                title=project.get("title", "Untitled review report"),
-                generated_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                export_mode=export_mode,
-                content=body,
-            )
-            return self.export_facade.export_html(report)
-        elif export_mode == "pdf":
-            body = self._generate_html_report(project, articles, votes, criteria, discussions)
-            report = GeneratedReport(
-                title=project.get("title", "Untitled review report"),
-                generated_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                export_mode=export_mode,
-                content=body,
-            )
-            return self.export_facade.export_pdf(report)
-        else:
+        export_strategies = {
+            "markdown": (self._generate_markdown_report, self.export_facade.export_markdown),
+            "html":     (self._generate_html_report,     self.export_facade.export_html),
+            "pdf":      (self._generate_html_report,     self.export_facade.export_pdf),
+        }
+        if export_mode not in export_strategies:
             raise ValueError(f"Unsupported export mode: {export_mode}")
+
+        generate_fn, export_fn = export_strategies[export_mode]
+        body = generate_fn(project, articles, votes, criteria, discussions)
+        report = GeneratedReport(
+            title=project.get("title", "Untitled review report"),
+            generated_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            export_mode=export_mode,
+            content=body,
+        )
+        return export_fn(report)
 
     def _compact_json_text(self, project: Dict[str, Any], articles: List[Dict[str, Any]], votes: List[Dict[str, Any]], criteria: Dict[str, Any], discussions: List[Dict[str, Any]]) -> str:
         article_sample = [self._short_article(article) for article in articles[:15]]
