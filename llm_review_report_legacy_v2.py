@@ -94,6 +94,15 @@ class OpenAIClient:
 
 
 @dataclass
+class ProjectReviewData:
+    project: Dict[str, Any]
+    articles: List[Dict[str, Any]]
+    votes: List[Dict[str, Any]]
+    criteria: Dict[str, Any]
+    discussions: List[Dict[str, Any]]
+
+
+@dataclass
 class GeneratedReport:
     title: str
     generated_at: str
@@ -342,7 +351,13 @@ class ProjectDataLoader:
             "inclusion": project_dict["inclusion_criteria"],
             "exclusion": project_dict["exclusion_criteria"],
         }
-        return project_dict, article_dicts, vote_dicts, criteria_dict, discussion_dicts
+        return ProjectReviewData(
+            project=project_dict,
+            articles=article_dicts,
+            votes=vote_dicts,
+            criteria=criteria_dict,
+            discussions=discussion_dicts,
+        )
 
     def _collect_exclusion_criteria(self, project: Any) -> List[str]:
         values = []
@@ -403,7 +418,7 @@ class ReporterService:
         self.data_loader = data_loader or ProjectDataLoader()
 
     def generate_report(self, project_id: Any, export_mode: str = "markdown") -> Any:
-        project, articles, votes, criteria, discussions = self.data_loader.load(project_id)
+        data = self.data_loader.load(project_id)
 
         export_strategies = {
             "markdown": (self._generate_markdown_report, self.export_facade.export_markdown),
@@ -414,25 +429,25 @@ class ReporterService:
             raise ValueError(f"Unsupported export mode: {export_mode}")
 
         generate_fn, export_fn = export_strategies[export_mode]
-        body = generate_fn(project, articles, votes, criteria, discussions)
+        body = generate_fn(data)
         report = GeneratedReport(
-            title=project.get("title", "Untitled review report"),
+            title=data.project.get("title", "Untitled review report"),
             generated_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
             export_mode=export_mode,
             content=body,
         )
         return export_fn(report)
 
-    def _compact_json_text(self, project: Dict[str, Any], articles: List[Dict[str, Any]], votes: List[Dict[str, Any]], criteria: Dict[str, Any], discussions: List[Dict[str, Any]]) -> str:
-        article_sample = [self._short_article(article) for article in articles[:15]]
-        vote_sample = [self._short_vote(vote) for vote in votes[:30]]
-        discussion_sample = [self._short_discussion(item) for item in discussions[:12]]
+    def _compact_json_text(self, data: ProjectReviewData) -> str:
+        article_sample = [self._short_article(article) for article in data.articles[:15]]
+        vote_sample = [self._short_vote(vote) for vote in data.votes[:30]]
+        discussion_sample = [self._short_discussion(item) for item in data.discussions[:12]]
         return (
-            f"Project: {project}\n\n"
-            f"Criteria: {criteria}\n\n"
-            f"Articles ({len(articles)} total, sample up to 15): {article_sample}\n\n"
-            f"Votes ({len(votes)} total, sample up to 30): {vote_sample}\n\n"
-            f"Discussions ({len(discussions)} total, sample up to 12): {discussion_sample}\n"
+            f"Project: {data.project}\n\n"
+            f"Criteria: {data.criteria}\n\n"
+            f"Articles ({len(data.articles)} total, sample up to 15): {article_sample}\n\n"
+            f"Votes ({len(data.votes)} total, sample up to 30): {vote_sample}\n\n"
+            f"Discussions ({len(data.discussions)} total, sample up to 12): {discussion_sample}\n"
         )
 
     def _short_article(self, article: Dict[str, Any]) -> Dict[str, Any]:
@@ -476,14 +491,7 @@ class ReporterService:
         except Exception as exc:
             raise ValueError(f"OpenAI failed while generating the {format_label} report: {exc}") from exc
 
-    def _generate_markdown_report(
-        self,
-        project: Dict[str, Any],
-        articles: List[Dict[str, Any]],
-        votes: List[Dict[str, Any]],
-        criteria: Dict[str, Any],
-        discussions: List[Dict[str, Any]],
-    ) -> str:
+    def _generate_markdown_report(self, data: ProjectReviewData) -> str:
         prompt = f"""
 You are helping with a systematic literature review.
 Generate the full final report directly in Markdown.
@@ -498,20 +506,13 @@ The report must include at least these sections:
 
 Use the following project data and do not invent article titles or counts.
 
-{self._compact_json_text(project, articles, votes, criteria, discussions)}
+{self._compact_json_text(data)}
 
 Return only Markdown.
 """
         return self._call_llm(prompt, "Markdown")
 
-    def _generate_html_report(
-        self,
-        project: Dict[str, Any],
-        articles: List[Dict[str, Any]],
-        votes: List[Dict[str, Any]],
-        criteria: Dict[str, Any],
-        discussions: List[Dict[str, Any]],
-    ) -> str:
+    def _generate_html_report(self, data: ProjectReviewData) -> str:
         prompt = f"""
 You are helping with a systematic literature review.
 Generate the full final report directly in HTML.
@@ -527,7 +528,7 @@ Requirements:
 
 Use the following project data and do not invent article titles or counts.
 
-{self._compact_json_text(project, articles, votes, criteria, discussions)}
+{self._compact_json_text(data)}
 
 Return only HTML.
 """
