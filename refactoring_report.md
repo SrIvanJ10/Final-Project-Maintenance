@@ -4,7 +4,7 @@
 
 El archivo original implementa un generador de reportes de revisión sistemática con llamadas a OpenAI.
 El código presentaba varios code smells documentados intencionalmente con fines pedagógicos.
-Se aplicaron 4 refactors incrementales, uno por commit.
+Se aplicaron 6 refactors incrementales, uno por commit.
 
 ---
 
@@ -247,6 +247,131 @@ tocar solo la dataclass y `ProjectDataLoader`, no todas las firmas intermedias.
 
 ---
 
+## Refactor 5 — Remove Middle Man: `ReportExportFacade` *(Middle Man)*
+
+**Smell:** `ReportExportFacade` tenía 3 métodos que únicamente reenviaban la llamada al
+exporter correspondiente sin añadir ninguna lógica propia. Una clase que solo delega
+es una indirección sin valor.
+
+**Técnica:** *Remove Middle Man* — eliminar la clase intermediaria e inyectar las
+dependencias reales directamente en el consumidor.
+
+### Antes
+
+```python
+class ReportExportFacade:
+    def export_markdown(self, report): return self.markdown_exporter.export(report)
+    def export_html(self, report):     return self.html_exporter.export(report)
+    def export_pdf(self, report):      return self.pdf_exporter.export(report)
+
+class ReporterService:
+    def __init__(self, ..., export_facade: Optional[ReportExportFacade] = None):
+        self.export_facade = export_facade or ReportExportFacade()
+
+    # uso:
+    export_strategies = {
+        "markdown": (..., self.export_facade.export_markdown),
+        "html":     (..., self.export_facade.export_html),
+        "pdf":      (..., self.export_facade.export_pdf),
+    }
+```
+
+### Después
+
+```python
+# ReportExportFacade eliminada
+
+class ReporterService:
+    def __init__(
+        self, ...,
+        markdown_exporter: Optional[MarkdownExporter] = None,
+        html_exporter: Optional[HtmlExporter] = None,
+        pdf_exporter: Optional[PdfExporter] = None,
+    ):
+        self.markdown_exporter = markdown_exporter or MarkdownExporter()
+        self.html_exporter     = html_exporter     or HtmlExporter()
+        self.pdf_exporter      = pdf_exporter      or PdfExporter()
+
+    # uso:
+    export_strategies = {
+        "markdown": (..., self.markdown_exporter.export),
+        "html":     (..., self.html_exporter.export),
+        "pdf":      (..., self.pdf_exporter.export),
+    }
+```
+
+**Resultado:** La clase intermediaria (15 líneas, 0 lógica) desaparece. Los exporters
+son inyectables individualmente, lo que facilita mockear solo el que interesa en cada test.
+
+---
+
+## Refactor 6 — Collapse Hierarchy: `OpenAIClient` *(Middle Man / Wrappers innecesarios)*
+
+**Smell:** Existían 5 clases para realizar una única llamada HTTP:
+- `OpenAIClient` → solo tenía `self.chat = OpenAIChat(...)`
+- `OpenAIChat` → solo tenía `self.completions = OpenAICompletions(...)`
+- `OpenAICompletions` → tenía la lógica HTTP real en `create()`
+- `OpenAIResponse`, `OpenAIChoice`, `OpenAIMessage` → envolvían el string de respuesta en 3 capas de objetos
+
+Esta jerarquía imitaba la interfaz del SDK oficial de OpenAI (`client.chat.completions.create(...)`)
+sin necesitar compatibilidad con él, creando indirección sin beneficio.
+
+**Técnica:** *Collapse Hierarchy* — fusionar la cadena en una única clase con interfaz directa.
+
+### Antes
+
+```python
+class OpenAIMessage:
+    def __init__(self, content): self.content = content
+
+class OpenAIChoice:
+    def __init__(self, content): self.message = OpenAIMessage(content)
+
+class OpenAIResponse:
+    def __init__(self, content): self.choices = [OpenAIChoice(content)]
+
+class OpenAICompletions:
+    def create(self, model, messages, temperature) -> OpenAIResponse:
+        ...  # HTTP call
+        return OpenAIResponse(content)
+
+class OpenAIChat:
+    def __init__(self, ...): self.completions = OpenAICompletions(...)
+
+class OpenAIClient:
+    def __init__(self, ...): self.chat = OpenAIChat(...)
+
+# uso en _call_llm:
+response = self.client.chat.completions.create(...)
+content  = response.choices[0].message.content
+```
+
+### Después
+
+```python
+class OpenAIClient:
+    def __init__(self, api_key, base_url, timeout):
+        if not api_key:
+            raise ValueError("Missing OpenAI API key")
+        self.api_key  = api_key
+        self.base_url = base_url.rstrip("/")
+        self.timeout  = timeout
+
+    def create(self, model, messages, temperature) -> str:
+        response = requests.post(...)
+        if response.status_code >= 400:
+            raise ValueError(...)
+        return response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+
+# uso en _call_llm:
+content = self.client.create(...)
+```
+
+**Resultado:** 5 clases → 1. La interfaz es directa: `client.create()` devuelve `str`.
+Mockear el cliente en tests requiere solo un objeto con un método `create()`.
+
+---
+
 ## Resumen
 
 | Refactor | Smell eliminado | Técnica |
@@ -255,7 +380,5 @@ tocar solo la dataclass y `ProjectDataLoader`, no todas las firmas intermedias.
 | 2 — `_call_llm` | Duplicated Code | Extract Method |
 | 3 — Dict de estrategias | Switch Statements, Duplicated Code | Replace Conditional with Strategy |
 | 4 — `ProjectReviewData` | Data Clumps, Primitive Obsession | Introduce Parameter Object |
-
-Smells pendientes de refactor:
-- **Middle Man** — `ReportExportFacade` solo delega sin añadir comportamiento
-- **Wrappers innecesarios** — `OpenAIClient → OpenAIChat → OpenAICompletions` duplica el cliente HTTP ya existente en `myscience/api/llm.py`
+| 5 — Eliminar `ReportExportFacade` | Middle Man | Remove Middle Man |
+| 6 — Colapsar wrappers OpenAI | Middle Man, Wrappers innecesarios | Collapse Hierarchy |
