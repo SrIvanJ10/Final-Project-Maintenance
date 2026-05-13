@@ -33,38 +33,18 @@ from typing import Any, Dict, List, Optional
 import requests
 
 
-class OpenAIMessage:
-    def __init__(self, content: str):
-        self.content = content
-
-
-class OpenAIChoice:
-    def __init__(self, content: str):
-        self.message = OpenAIMessage(content)
-
-
-class OpenAIResponse:
-    def __init__(self, content: str):
-        self.choices = [OpenAIChoice(content)]
-
-
-class OpenAICompletions:
+class OpenAIClient:
     def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1", timeout: int = 180):
+        if not api_key:
+            raise ValueError("Missing OpenAI API key")
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def create(self, model: str, messages: List[Dict[str, str]], temperature: float):
-        if not self.api_key:
-            raise ValueError("Missing OpenAI API key")
-
+    def create(self, model: str, messages: List[Dict[str, str]], temperature: float) -> str:
         response = requests.post(
             f"{self.base_url}/chat/completions",
-            json={
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-            },
+            json={"model": model, "messages": messages, "temperature": temperature},
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
@@ -74,23 +54,12 @@ class OpenAICompletions:
         if response.status_code >= 400:
             raise ValueError(f"OpenAI request failed ({response.status_code}): {response.text[:300]}")
 
-        data = response.json()
-        content = (
-            data.get("choices", [{}])[0]
+        return (
+            response.json()
+            .get("choices", [{}])[0]
             .get("message", {})
             .get("content", "")
         )
-        return OpenAIResponse(content)
-
-
-class OpenAIChat:
-    def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1", timeout: int = 180):
-        self.completions = OpenAICompletions(api_key=api_key, base_url=base_url, timeout=timeout)
-
-
-class OpenAIClient:
-    def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1", timeout: int = 180):
-        self.chat = OpenAIChat(api_key=api_key, base_url=base_url, timeout=timeout)
 
 
 @dataclass
@@ -460,7 +429,7 @@ class ReporterService:
 
     def _call_llm(self, prompt: str, format_label: str) -> str:
         try:
-            response = self.client.chat.completions.create(
+            content = self.client.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a systematic review reporting assistant."},
@@ -468,7 +437,6 @@ class ReporterService:
                 ],
                 temperature=self.temperature,
             )
-            content = response.choices[0].message.content
             if not content:
                 raise ValueError(f"OpenAI returned an empty {format_label} report")
             return content.strip()
