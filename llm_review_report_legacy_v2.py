@@ -471,6 +471,23 @@ class ReporterService:
             "message": str(item.get("message", ""))[:160],
         }
 
+    def _call_llm(self, prompt: str, format_label: str) -> str:
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a systematic review reporting assistant."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=self.temperature,
+            )
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError(f"OpenAI returned an empty {format_label} report")
+            return content.strip()
+        except Exception as exc:
+            raise ValueError(f"OpenAI failed while generating the {format_label} report: {exc}") from exc
+
     def _generate_markdown_report(
         self,
         project: Dict[str, Any],
@@ -497,21 +514,7 @@ Use the following project data and do not invent article titles or counts.
 
 Return only Markdown.
 """
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a systematic review reporting assistant."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=self.temperature,
-            )
-            content = response.choices[0].message.content
-            if not content:
-                raise ValueError("OpenAI returned an empty Markdown report")
-            return content.strip()
-        except Exception as exc:
-            raise ValueError(f"OpenAI failed while generating the Markdown report: {exc}") from exc
+        return self._call_llm(prompt, "Markdown")
 
     def _generate_html_report(
         self,
@@ -540,18 +543,4 @@ Use the following project data and do not invent article titles or counts.
 
 Return only HTML.
 """
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a systematic review reporting assistant."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=self.temperature,
-            )
-            content = response.choices[0].message.content
-            if not content:
-                raise ValueError("OpenAI returned an empty HTML report")
-            return content.strip()
-        except Exception as exc:
-            raise ValueError(f"OpenAI failed while generating the HTML report: {exc}") from exc
+        return self._call_llm(prompt, "HTML")
