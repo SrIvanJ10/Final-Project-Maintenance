@@ -848,6 +848,78 @@ class SearchResultViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+    @action(detail=True, methods=['get'])
+    def timeline(self, request, pk=None):
+        """Return a unified timeline of events for this search result."""
+        result = self.get_object()
+
+        events = []
+
+        # Import/search event
+        if result.search.executed_at:
+            events.append({
+                "type": "import",
+                "timestamp": result.search.executed_at,
+                "message": f"Article imported from {result.article.article_source}",
+            })
+
+        # Reviewer assessments
+        assessments = SearchResultAssessment.objects.filter(
+            search_result=result
+        ).select_related('reviewer')
+
+        for assessment in assessments:
+            events.append({
+                "type": "review_vote",
+                "timestamp": assessment.created_at,
+                "user": assessment.reviewer.username,
+                "decision": assessment.relevance,
+                "notes": assessment.notes,
+            })
+
+        # AI recommendations
+        ai_interactions = ArticleAIInteraction.objects.filter(
+            search_result=result,
+            status='completed'
+        )
+
+        for interaction in ai_interactions:
+            events.append({
+                "type": "ai_recommendation",
+                "timestamp": interaction.completed_at,
+                "recommendation": interaction.recommendation,
+                "rationale": interaction.rationale,
+            })
+
+        # Discussion messages
+        discussion_messages = ArticleDiscussionMessage.objects.filter(
+            article=result.article,
+            project=result.search.criteria.project
+        ).select_related('author')
+
+        for message in discussion_messages:
+            events.append({
+                "type": "comment",
+                "timestamp": message.created_at,
+                "user": message.author.username,
+                "message": message.message,
+            })
+
+        # Current consensus status
+        if result.assessed_at:
+            events.append({
+                "type": "consensus",
+                "timestamp": result.assessed_at,
+                "value": result.relevance,
+            })
+
+        # Sort newest first
+        events.sort(
+            key=lambda event: event["timestamp"] or timezone.now(),
+            reverse=True
+        )
+
+        return Response(events)
 
 
 class WorkflowPhaseViewSet(viewsets.ModelViewSet):
