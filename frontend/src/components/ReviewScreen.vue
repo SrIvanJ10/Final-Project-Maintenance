@@ -1,8 +1,9 @@
 <script setup>
+import { ref, watch } from 'vue'
 import { formatAuthors, sourceLabel, formatDateTime } from '../utils/formatters.js'
 import { relevanceClass, relevanceTag, reviewerDecisionText, consensusLabel } from '../utils/relevance.js'
 
-defineProps({
+const props = defineProps({
   selectedProject: Object,
   reviewedCount: Number,
   totalCount: Number,
@@ -19,19 +20,43 @@ defineProps({
   discussionLoading: Boolean,
   discussionSending: Boolean,
   discussionMessage: String,
-  user: Object,
+  user: Object
 })
 
 const emit = defineEmits([
-  'back',
-  'exclude',
-  'include',
-  'suggest-ai',
-  'send-message',
-  'update:discussionMessage',
-  'previous',
-  'next'
+  'back', 'exclude', 'include', 'suggest-ai', 'send-message', 
+  'update:discussionMessage', 'previous', 'next'
 ])
+
+// Timeline Local State
+const timeline = ref([])
+const timelineLoading = ref(false)
+
+async function fetchTimeline() {
+  const articleId = props.currentReviewResult?.id
+  if (!articleId) return
+
+  timelineLoading.value = true
+  try {
+    const response = await fetch(`/api/v1/search-results/${articleId}/timeline/`)
+    if (response.ok) {
+      const data = await response.json()
+      timeline.value = Array.isArray(data) ? data : []
+    } else {
+      timeline.value = []
+    }
+  } catch (err) {
+    console.error("Timeline error:", err)
+    timeline.value = []
+  } finally {
+    timelineLoading.value = false
+  }
+}
+
+// Watch for article changes to refresh the timeline
+watch(() => props.currentReviewResult?.id, (newId) => {
+  if (newId) fetchTimeline()
+}, { immediate: true })
 </script>
 
 <template>
@@ -185,6 +210,27 @@ const emit = defineEmits([
           </div>
         </div>
       </div>
+
+      <section class="review-section">
+        <h3>Article History</h3>
+        <div v-if="timelineLoading" class="info-box">Loading history...</div>
+        
+        <div v-else-if="timeline.length === 0" class="info-box">
+          No history recorded for this article.
+        </div>
+
+        <div v-else class="timeline-list">
+          <div v-for="(event, index) in timeline" :key="index" class="timeline-item" style="margin-bottom: 10px; padding-left: 10px; border-left: 2px solid #ccc;">
+            <strong>{{ event.type }}</strong> 
+            <span style="font-size: 0.8em; color: #666; margin-left: 10px;">
+              {{ formatDateTime(event.timestamp) }}
+            </span>
+            <p style="margin: 2px 0 0; font-size: 0.9em;">
+              By {{ event.user?.username || 'System' }}
+            </p>
+          </div>
+        </div>
+      </section>
 
       <footer class="review-nav">
         <button class="ghost" :disabled="reviewIndex === 0" @click="emit('previous')">< Previous</button>
