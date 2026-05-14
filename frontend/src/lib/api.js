@@ -340,3 +340,14 @@ export function deleteExtractedData(id) {
     method: 'DELETE',
   })
 }
+
+export function getArticleTimeline(articleId) {
+  return request(`/api/v1/articles/${articleId}/timeline/`)
+}
+
+export function generateProjectReport(projectId, customPrompt) {
+  return request(`/api/v1/projects/${projectId}/generate_report/`, {
+    method: 'POST',
+    body: JSON.stringify({ custom_prompt: customPrompt }),
+  })
+}

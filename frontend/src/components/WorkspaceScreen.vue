@@ -6,9 +6,13 @@ defineProps({
   canReview: { type: Boolean, default: false },
   isOwner: { type: Boolean, default: false },
   drafts: { type: Object, required: true },
+  generatingReport: { type: Boolean, default: false },
+  generatedReport: { type: String, default: null },
+  totalCount: { type: Number, default: 0 },
+  pendingCount: { type: Number, default: 0 },
 })
 
-const emit = defineEmits(['save-criteria', 'add-collaborator', 'back'])
+const emit = defineEmits(['save-criteria', 'add-collaborator', 'generate-report', 'back'])
 </script>
 
 <template>
@@ -60,6 +64,23 @@ const emit = defineEmits(['save-criteria', 'add-collaborator', 'back'])
             <option value="advisor">Advisor</option>
           </select>
           <button class="primary" @click="emit('add-collaborator')">Add collaborator</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- AI Report Panel -->
+    <section class="workspace-panel" v-if="selectedProject.status === 'completed' || (totalCount > 0 && pendingCount === 0)">
+      <div class="query-tab">
+        <h2>Generate AI Report</h2>
+        <p class="hint">The screening phase is finished. You can now generate an automated review report based on the included articles.</p>
+        <textarea v-model="drafts.reportPrompt" rows="3" placeholder="Enter custom instructions for the LLM report..."></textarea>
+        <div class="inline-actions">
+          <button class="primary" :disabled="generatingReport" @click="emit('generate-report')">
+            {{ generatingReport ? 'Generating...' : 'Generate Report' }}
+          </button>
+        </div>
+        <div v-if="generatedReport" class="report-result" style="margin-top: 1rem; padding: 1rem; background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 4px; white-space: pre-wrap; font-family: monospace;">
+          {{ generatedReport }}
         </div>
       </div>
     </section>

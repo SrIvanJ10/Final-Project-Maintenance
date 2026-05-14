@@ -9,6 +9,7 @@ from core.models import (
     ArticleAIInteraction,
     ArticleDiscussionMessage,
     ProjectMembership,
+    ArticleEvent,
 )
 from workflow.models import WorkflowPhase, ScreeningTask, DataExtractionTemplate, ExtractedData
 from django.contrib.auth.models import User
@@ -23,7 +24,7 @@ class UserSerializer(serializers.ModelSerializer):
 class ProjectSerializer(serializers.ModelSerializer):
     owner = UserSerializer(read_only=True)
     collaborators = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Project
         fields = [
@@ -209,6 +210,18 @@ class ArticleDiscussionMessageSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(str(exc))
 
         return attrs
+
+
+class ArticleEventSerializer(serializers.ModelSerializer):
+    user = UserSerializer(read_only=True)
+
+    class Meta:
+        model = ArticleEvent
+        fields = [
+            'id', 'project', 'article', 'user', 'event_type',
+            'description', 'metadata', 'created_at',
+        ]
+        read_only_fields = fields
 
 
 class WorkflowPhaseSerializer(serializers.ModelSerializer):

@@ -25,13 +25,15 @@ from core.models import (
     ArticleAIInteraction,
     ArticleDiscussionMessage,
     ProjectMembership,
+    ArticleEvent,
 )
 from workflow.models import WorkflowPhase, ScreeningTask, DataExtractionTemplate, ExtractedData
 from api.serializers import (
     ProjectSerializer, SearchCriteriaSerializer, SearchSerializer,
     ArticleSerializer, SearchResultSerializer, WorkflowPhaseSerializer,
     ScreeningTaskSerializer, DataExtractionTemplateSerializer, ExtractedDataSerializer,
-    UserSerializer, ArticleAIInteractionSerializer, ArticleDiscussionMessageSerializer
+    UserSerializer, ArticleAIInteractionSerializer, ArticleDiscussionMessageSerializer,
+    ArticleEventSerializer
 )
 from api.llm import request_article_suggestion, generate_project_inclusion_criteria, LLMServiceError
 from semantic_scholar.client import SemanticScholarAPI, SemanticScholarRateLimitError
@@ -369,6 +371,27 @@ class ProjectViewSet(viewsets.ModelViewSet):
             ],
         })
 
+    @action(detail=True, methods=['post'])
+    def generate_report(self, request, pk=None):
+        """Generate LLM report based on included articles"""
+        project = self.get_object()
+        custom_prompt = request.data.get('custom_prompt', '').strip()
+        
+        from workflow.models import ScreeningTask
+        active_tasks = ScreeningTask.objects.filter(phase__project=project).exclude(status='completed')
+        if active_tasks.exists():
+            return Response({'error': 'No se puede generar el reporte hasta que todas las tareas de screening esten completadas.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        from api.llm_review_report_legacy_v2 import UnifiedReviewReportService
+        service = UnifiedReviewReportService(project.id)
+        
+        try:
+            report_text = service.generate_report(custom_instructions=custom_prompt)
+            return Response({'report': report_text}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error generating report: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 class SearchCriteriaViewSet(viewsets.ModelViewSet):
     """ViewSet for managing search criteria"""
@@ -635,6 +658,17 @@ class ArticleViewSet(viewsets.ReadOnlyModelViewSet):
             search_results__search__criteria__project__in=user_projects
         ).distinct()
 
+    @action(detail=True, methods=['get'])
+    def timeline(self, request, pk=None):
+        article = self.get_object()
+        user_projects = accessible_projects_for(request.user)
+        events = ArticleEvent.objects.filter(
+            article=article,
+            project__in=user_projects
+        ).select_related('user', 'project')
+        serializer = ArticleEventSerializer(events, many=True)
+        return Response(serializer.data)
+
 
 class ArticleDiscussionMessageViewSet(viewsets.ModelViewSet):
     """Chat-style discussion messages for a paper within a project."""
@@ -656,7 +690,17 @@ class ArticleDiscussionMessageViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(author=request.user)
+        message = serializer.save(author=request.user)
+        
+        ArticleEvent.objects.create(
+            project=message.project,
+            article=message.article,
+            user=request.user,
+            event_type='comment',
+            description=f"Nuevo comentario: {message.message[:50]}...",
+            metadata={'message_id': message.id}
+        )
+        
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
@@ -768,6 +812,16 @@ class SearchResultViewSet(viewsets.ModelViewSet):
             interaction.status = 'completed'
             interaction.completed_at = timezone.now()
             interaction.save()
+            
+            ArticleEvent.objects.create(
+                project=project,
+                article=article,
+                user=request.user,
+                event_type='ai_recommendation',
+                description=f"La IA sugiere: {interaction.get_recommendation_display()}.",
+                metadata={'interaction_id': interaction.id, 'recommendation': interaction.recommendation}
+            )
+            
             return Response(ArticleAIInteractionSerializer(interaction).data, status=status.HTTP_201_CREATED)
         except LLMServiceError as exc:
             interaction.status = 'failed'

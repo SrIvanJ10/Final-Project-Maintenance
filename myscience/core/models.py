@@ -577,6 +577,17 @@ class SearchResult(models.Model):
 
         if save:
             self.save(update_fields=['relevance', 'assessed_by', 'assessed_at', 'reviewer_notes'])
+            
+        if self.relevance != 'not_reviewed' and getattr(self, '_old_relevance', None) != self.relevance:
+            ArticleEvent.objects.create(
+                project=project,
+                article=self.article,
+                user=None,
+                event_type='consensus',
+                description=f"Consenso alcanzado: {self.get_relevance_display()}.",
+                metadata={'new_relevance': self.relevance}
+            )
+            
         return self.relevance
 
     def record_assessment(self, reviewer, relevance, notes=''):
@@ -589,6 +600,8 @@ class SearchResult(models.Model):
         if relevance == 'not_reviewed':
             raise ValueError('Use an inclusion or exclusion decision, not not_reviewed')
 
+        is_update = SearchResultAssessment.objects.filter(search_result=self, reviewer=reviewer).exists()
+
         assessment, _ = SearchResultAssessment.objects.update_or_create(
             search_result=self,
             reviewer=reviewer,
@@ -597,6 +610,17 @@ class SearchResult(models.Model):
                 'notes': notes,
             },
         )
+        
+        ArticleEvent.objects.create(
+            project=self.search.criteria.project,
+            article=self.article,
+            user=reviewer,
+            event_type='vote',
+            description=f"Voto emitido: {assessment.get_relevance_display()}.",
+            metadata={'relevance': relevance, 'is_update': is_update}
+        )
+        
+        self._old_relevance = self.relevance
         self.sync_consensus_decision()
         return assessment
 
@@ -784,3 +808,55 @@ class ArticleDiscussionMessage(models.Model):
             raise ValueError('This article does not belong to the selected project')
 
         return True
+
+
+class ArticleEvent(models.Model):
+    """Event timeline for articles within a project."""
+
+    EVENT_TYPE_CHOICES = (
+        ('import', 'Importado'),
+        ('vote', 'Voto emitido/cambiado'),
+        ('consensus', 'Cambio de consenso'),
+        ('ai_recommendation', 'Recomendación IA'),
+        ('comment', 'Comentario añadido'),
+    )
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='article_events',
+        verbose_name='Proyecto',
+    )
+    article = models.ForeignKey(
+        Article,
+        on_delete=models.CASCADE,
+        related_name='events',
+        verbose_name='Artículo',
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='article_events',
+        verbose_name='Usuario',
+    )
+    event_type = models.CharField(
+        max_length=30,
+        choices=EVENT_TYPE_CHOICES,
+        verbose_name='Tipo de evento',
+    )
+    description = models.TextField(verbose_name='Descripción')
+    metadata = models.JSONField(default=dict, blank=True, verbose_name='Metadatos')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Fecha de creación')
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Evento de artículo'
+        verbose_name_plural = 'Eventos de artículos'
+        indexes = [
+            models.Index(fields=['project', 'article', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.get_event_type_display()} - {self.article.title[:40]}'

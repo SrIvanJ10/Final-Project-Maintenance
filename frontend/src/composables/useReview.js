@@ -58,6 +58,8 @@ export function useReview({
   const reviewIndex = ref(0)
   const aiLoading = ref(false)
   const aiSuggestion = ref(null)
+  const timelineEvents = ref([])
+  const timelineLoading = ref(false)
 
   // ── Task-based filtering ───────────────────────────────────────────
   const projectTasks = computed(() => {
@@ -224,6 +226,21 @@ export function useReview({
     downloadCsv(csv, filename)
   }
 
+  async function loadTimeline() {
+    if (!currentReviewResult.value?.article?.id) {
+      timelineEvents.value = []
+      return
+    }
+    timelineLoading.value = true
+    try {
+      timelineEvents.value = await api.getArticleTimeline(currentReviewResult.value.article.id)
+    } catch (e) {
+      console.error('Failed to load timeline', e)
+    } finally {
+      timelineLoading.value = false
+    }
+  }
+
   return {
     // filters
     articleSourceFilter,
@@ -247,5 +264,8 @@ export function useReview({
     nextArticle,
     previousArticle,
     exportResultsCsv,
+    loadTimeline,
+    timelineEvents,
+    timelineLoading,
   }
 }
