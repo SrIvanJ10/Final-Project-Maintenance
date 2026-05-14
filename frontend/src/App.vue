@@ -72,7 +72,10 @@ const discussion = useDiscussion({
 // ── Watchers ───────────────────────────────────────────────────────
 watch(
   () => [projects.screen.value, projects.selectedProject.value?.id, review.currentReviewResult.value?.article?.id],
-  () => discussion.loadDiscussionThread()
+  () => {
+    discussion.loadDiscussionThread()
+    review.loadTimeline()
+  }
 )
 
 onMounted(boot)
@@ -121,6 +124,11 @@ onMounted(boot)
           :can-review="projects.canReview.value"
           :is-owner="projects.isOwner.value"
           :drafts="projects.drafts"
+          :generating-report="projects.generatingReport.value"
+          :generated-report="projects.generatedReport.value"
+          :total-count="projects.totalCount.value"
+          :pending-count="projects.pendingCount.value"
+          @generate-report="projects.generateReport"
           @save-criteria="projects.saveProjectInclusionCriteria"
           @add-collaborator="projects.addCollaborator"
           @back="projects.backToProjects"
@@ -194,6 +202,8 @@ onMounted(boot)
           :can-review="projects.canReview.value"
           :ai-loading="review.aiLoading.value"
           :ai-suggestion="review.aiSuggestion.value"
+          :timeline-events="review.timelineEvents.value"
+          :timeline-loading="review.timelineLoading.value"
           :discussion-messages="discussion.discussionMessages.value"
           :discussion-loading="discussion.discussionLoading.value"
           :discussion-sending="discussion.discussionSending.value"

@@ -15,6 +15,8 @@ defineProps({
   canReview: Boolean,
   aiLoading: Boolean,
   aiSuggestion: Object,
+  timelineEvents: Array,
+  timelineLoading: Boolean,
   discussionMessages: Array,
   discussionLoading: Boolean,
   discussionSending: Boolean,
@@ -136,6 +138,37 @@ const emit = defineEmits([
           <p><strong>Provider:</strong> OpenAI</p>
           <p><strong>Suggestion:</strong> {{ aiSuggestion.recommendation }}</p>
           <p><strong>Rationale:</strong> {{ aiSuggestion.rationale || 'No rationale provided' }}</p>
+        </div>
+      </div>
+
+      <!-- Timeline Panel -->
+      <div class="discussion-panel" style="margin-bottom: 2rem;">
+        <div class="discussion-head">
+          <div>
+            <h3>Article Timeline</h3>
+            <p>Chronological history of events for this article.</p>
+          </div>
+          <span class="status-pill source">{{ timelineEvents?.length || 0 }} events</span>
+        </div>
+
+        <div v-if="timelineLoading" class="discussion-empty">
+          Loading timeline...
+        </div>
+        <div v-else-if="!timelineEvents?.length" class="discussion-empty">
+          No events recorded for this article yet.
+        </div>
+        <div v-else class="discussion-thread">
+          <article
+            v-for="event in timelineEvents"
+            :key="event.id"
+            class="discussion-message"
+          >
+            <div class="discussion-meta">
+              <strong>{{ event.event_type }} - {{ event.user?.username || 'System' }}</strong>
+              <span>{{ formatDateTime(event.created_at) }}</span>
+            </div>
+            <p>{{ event.description }}</p>
+          </article>
         </div>
       </div>
 

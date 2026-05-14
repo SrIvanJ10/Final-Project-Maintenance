@@ -33,6 +33,8 @@ export function useProjects({ user, status, setFlash }) {
   const projectModalOpen = ref(false)
   const selectedProjectId = ref(null)
   const loading = ref(false)
+  const generatingReport = ref(false)
+  const generatedReport = ref(null)
 
   // ── Drafts ─────────────────────────────────────────────────────────
   const drafts = reactive({
@@ -41,6 +43,7 @@ export function useProjects({ user, status, setFlash }) {
     projectInclusionCriteriaEdit: '',
     collaboratorQuery: '',
     collaboratorRole: 'reviewer',
+    reportPrompt: '',
   })
 
   // ── Computed ───────────────────────────────────────────────────────
@@ -231,6 +234,21 @@ export function useProjects({ user, status, setFlash }) {
     }
   }
 
+  async function generateReport() {
+    if (!selectedProject.value) return
+    generatingReport.value = true
+    setFlash()
+    try {
+      const response = await api.generateProjectReport(selectedProject.value.id, drafts.reportPrompt)
+      generatedReport.value = response.report
+      setFlash('Report generated successfully')
+    } catch (e) {
+      setFlash('', e.message)
+    } finally {
+      generatingReport.value = false
+    }
+  }
+
   return {
     // stores
     lists,
@@ -265,5 +283,8 @@ export function useProjects({ user, status, setFlash }) {
     saveProjectInclusionCriteria,
     addCollaborator,
     clearProjectDraft,
+    generateReport,
+    generatingReport,
+    generatedReport,
   }
 }
